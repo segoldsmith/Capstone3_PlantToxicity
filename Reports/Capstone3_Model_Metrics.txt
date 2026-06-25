@@ -1,0 +1,163 @@
+==============================================================================
+ CAPSTONE 3 - MODEL METRICS SUMMARY
+ Poisonous vs. Non-Poisonous Plant Classification
+==============================================================================
+
+FINAL MODEL: Tuned EfficientNet-B0 (3-phase fine-tuned, calibrated, threshold-tuned)
+
+
+------------------------------------------------------------------------------
+1. MODEL ARCHITECTURE
+------------------------------------------------------------------------------
+Base architecture .............. EfficientNet-B0
+Pretrained weights .............. ImageNet1K_V1
+Classifier head .................. Linear layer, in_features -> 2 classes
+Output classes ................... 2 (Non-Toxic = 0, Toxic = 1)
+Input image size ................. 224 x 224 (resized from 256, center/random crop)
+Framework ......................... PyTorch (torchvision.models)
+
+
+------------------------------------------------------------------------------
+2. INPUT FEATURES / PREPROCESSING
+------------------------------------------------------------------------------
+Input type ........................ RGB plant photographs
+Normalization mean ................ [0.485, 0.456, 0.406]  (ImageNet stats)
+Normalization std ................. [0.229, 0.224, 0.225]  (ImageNet stats)
+
+Training-set augmentation:
+  - Resize ........................ 256 px (shorter side)
+  - RandomResizedCrop ............. 224 px, scale (0.8, 1.0)
+  - RandomHorizontalFlip
+  - RandomVerticalFlip
+  - RandomRotation ................ +/- 20 degrees
+  - ColorJitter .................... brightness=0.2, contrast=0.2, saturation=0.2
+  - RandomAffine (shear=2) ........ applied with p=0.15
+  - RandomPerspective (distortion=0.05) ... applied with p=0.10
+  - RandomErasing ................. p=0.2, scale (0.02, 0.15), ratio (0.3, 3.3)
+  - Mixup (alpha=0.4) ............. applied to ~25% of batches
+  - CutMix (alpha=0.4) ............. applied to ~25% of batches
+
+Validation-set preprocessing:
+  - Resize (256) -> CenterCrop (224) -> Normalize (no augmentation)
+
+Note: Heavy geometric augmentation (flips, rotation, cropping) was used
+specifically to prevent the model from learning image ORIENTATION as a
+shortcut for toxicity, after EDA found a statistically significant
+association between orientation and toxicity label (chi-square = 58.62,
+p < 0.001) in the raw dataset.
+
+
+------------------------------------------------------------------------------
+3. DATA SPLIT
+------------------------------------------------------------------------------
+Total images ...................... 9,952
+Train / Validation split .......... 80% / 20%
+Split method ....................... random_split (seed = 42)
+Batch size ......................... 32
+Random seed ........................ 42 (set across random, numpy, torch)
+
+
+------------------------------------------------------------------------------
+4. TRAINING HYPERPARAMETERS (3-Phase Fine-Tuning)
+------------------------------------------------------------------------------
+Loss function ...................... CrossEntropyLoss
+  - Class weights ................. [1.0 (non-toxic), 1.3 (toxic)]
+  - Label smoothing ................ 0.05
+Optimizer .......................... Adam
+
+  Phase 1 - Train classifier head only (backbone frozen)
+    Epochs ........................ 6
+    Learning rate ................. 2e-4
+    LR schedule ................... Linear warmup (3 epochs) -> Cosine annealing
+
+  Phase 2 - Unfreeze top 30% of backbone (blocks 5-6)
+    Epochs ........................ 4
+    Learning rate ................. 3e-5
+    LR schedule ................... Linear warmup (2 epochs) -> Cosine annealing
+
+  Phase 3 - Full fine-tune (entire network unfrozen)
+    Epochs ........................ 10
+    Learning rate ................. 1e-5
+    LR schedule ................... Cosine annealing (T_max=10, eta_min=5e-6)
+
+Total training epochs .............. 20 (across all 3 phases)
+Total training time ................ ~178 minutes (~3.0 hours)
+
+
+------------------------------------------------------------------------------
+5. CALIBRATION & DECISION THRESHOLD
+------------------------------------------------------------------------------
+Calibration method ................. Temperature scaling (post-hoc, on validation logits)
+Learned temperature ................ 0.828
+Threshold tuning method ............ Swept thresholds 0.10-0.90; selected value
+                                      maximizing F2 score (recall-weighted)
+Operating decision threshold ....... 0.28
+                                      (toxic predicted when P(toxic) >= 0.28)
+
+Rationale: Default threshold (0.50) reached only 86.4% recall on the toxic
+class. Threshold was lowered specifically to satisfy the project's primary
+goal of >=90% recall, accepting a precision trade-off (more false-positive
+toxic flags) in exchange for far fewer missed toxic plants.
+
+
+------------------------------------------------------------------------------
+6. FINAL PERFORMANCE METRICS (Validation Set, n=1,991, threshold=0.28)
+------------------------------------------------------------------------------
+                          BEFORE TUNING        AFTER TUNING
+                       (threshold = 0.50)   (threshold = 0.28, FINAL)
+  Accuracy ..................  83.68%               80.26%
+  Recall (toxic class) ......  86.36%               95.36%   
+  Precision (toxic class) ...  82.38%               73.61%
+  F2 Score ..................  0.8554               0.9004
+
+  Confusion Matrix (threshold = 0.28, final operating point):
+                          Predicted: Non-Toxic   Predicted: Toxic
+    Actual: Non-Toxic            633                   346
+    Actual: Toxic                  47                   965
+
+  False Negative rate (missed toxic plants) .... 4.6%  (47 of 1,012 toxic)
+  False Positive rate (false toxic alarms) ..... 35.3% (346 of 979 non-toxic)
+
+PROJECT TARGET: >=90% recall on toxic class  --> ACHIEVED (95.36%)
+
+
+------------------------------------------------------------------------------
+7. MODEL PROGRESSION (for comparison)
+------------------------------------------------------------------------------
+  Model                          Val Accuracy   Recall    Precision   F2
+  ---------------------------------------------------------------------------
+  ResNet18 (frozen, baseline) ..... 72.12%       71.69%     73.90%    0.7212
+  EfficientNet-B0 (frozen, basic) . 75.44%       74.20%     77.58%    0.7485
+  EfficientNet-B0 (tuned, @0.50) .. 83.68%       86.36%     82.38%    0.8554
+  EfficientNet-B0 (tuned, @0.28) .. 80.26%       95.36%     73.61%    0.9004  
+
+
+------------------------------------------------------------------------------
+8. FULL-DATASET PREDICTION RESULTS (all 9,952 images, threshold=0.28)
+------------------------------------------------------------------------------
+Note: Includes images seen during training; provided for species-level
+error analysis only, not as an unbiased performance estimate (see
+section 6 above for validation-set metrics).
+
+  Toxic images ........... 4,953 total  ->  4,888 flagged Toxic, 65 missed
+  Non-toxic images ........ 4,999 total  ->  3,306 flagged Non-Toxic, 1,693 false alarms
+
+  Accuracy by species:
+    Toxic species:
+      Poison Sumac ............... 99.10%  (9 missed / 999)
+      Eastern Poison Ivy .......... 99.00%  (10 missed / 1,000)
+      Western Poison Ivy .......... 98.80%  (12 missed / 1,000)
+      Western Poison Oak .......... 98.60%  (14 missed / 1,000)
+      Eastern Poison Oak .......... 97.90%  (20 missed / 954)
+
+    Non-toxic species:
+      Jack-in-the-pulpit .......... 82.80%  (172 false alarms / 1,000)
+      Bear Oak ..................... 73.20%  (268 false alarms / 1,000)
+      Virginia Creeper ............. 67.20%  (328 false alarms / 1,000)
+      Boxelder ...................... 57.10%  (429 false alarms / 1,000)
+      Fragrant Sumac ................ 50.35%  (496 false alarms / 999)
+
+KEY FINDING: The model is highly reliable on every toxic species (98-99%)
+but produces frequent false-positive "toxic" flags on certain non-toxic
+species that visually resemble their toxic counterparts (most notably
+Fragrant Sumac, which closely resembles Poison Sumac).
